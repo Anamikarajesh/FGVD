@@ -1,0 +1,12 @@
+torch
+torchvision
+torchaudio
+torch-geometric
+pandas
+numpy
+scikit-learn
+scipy
+matplotlib
+networkx
+ipykernel
+jupyter
