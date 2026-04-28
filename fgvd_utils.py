@@ -514,10 +514,16 @@ def build_parent_index(class_names: Sequence[str], level: str) -> np.ndarray:
 
 
 class MaskedHierarchicalCE(nn.Module):
-    """Cross-entropy where logits whose parent ≠ true parent are masked to -inf.
+    """Cross-entropy where logits whose parent ≠ true parent are masked out.
 
     Forces the network to compete only within the correct parent group during
     training, which is the single-multi-head equivalent of cascaded prediction.
+
+    Implementation note: we cannot pass ``-inf`` masked logits to
+    ``F.cross_entropy(label_smoothing=...)`` — the smoothing term sums
+    ``log_softmax`` across all classes, including masked positions whose
+    softmax is 0 → ``log(0) = -inf`` → loss = inf. We compute log-softmax
+    manually over the un-masked subset and apply smoothing inside that group.
     """
 
     def __init__(self, parent_per_class: torch.Tensor, weight: torch.Tensor | None = None,
@@ -526,18 +532,35 @@ class MaskedHierarchicalCE(nn.Module):
         # parent_per_class: LongTensor (C,)  giving parent group id for each class
         self.register_buffer("parent_per_class", parent_per_class.long())
         self.weight = weight
-        self.label_smoothing = label_smoothing
+        self.label_smoothing = float(label_smoothing)
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        # parent of target sample
-        target_parent = self.parent_per_class[targets]              # (B,)
-        # Build mask: for each (b, c), True iff parent_per_class[c] == target_parent[b]
-        # Shape (B, C)
-        mask = self.parent_per_class.unsqueeze(0) == target_parent.unsqueeze(1)
-        masked_logits = logits.masked_fill(~mask, float("-inf"))
-        return F.cross_entropy(
-            masked_logits, targets, weight=self.weight, label_smoothing=self.label_smoothing
-        )
+        target_parent = self.parent_per_class[targets]                  # (B,)
+        mask = self.parent_per_class.unsqueeze(0) == target_parent.unsqueeze(1)  # (B, C) bool
+
+        # Replace masked positions with very negative finite value so log_softmax stays finite.
+        very_neg = torch.finfo(logits.dtype).min / 4
+        masked_logits = logits.masked_fill(~mask, very_neg)
+        log_probs = F.log_softmax(masked_logits, dim=1)                 # (B, C)
+
+        # NLL on the true class — guaranteed un-masked since parent matches itself.
+        nll = -log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)     # (B,)
+
+        if self.label_smoothing > 0:
+            # Mean log-prob within the un-masked group only.
+            zeros = torch.zeros_like(log_probs)
+            in_group_lp = torch.where(mask, log_probs, zeros)           # (B, C)
+            n_in_group = mask.sum(dim=1).clamp(min=1).to(log_probs.dtype)
+            mean_lp = in_group_lp.sum(dim=1) / n_in_group               # (B,)
+            eps = self.label_smoothing
+            sample_loss = (1.0 - eps) * nll + eps * (-mean_lp)
+        else:
+            sample_loss = nll
+
+        if self.weight is not None:
+            sample_loss = sample_loss * self.weight[targets]
+
+        return sample_loss.mean()
 
 
 def hierarchical_predict(
