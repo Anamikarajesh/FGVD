@@ -157,4 +157,4 @@ Classes with `train_count < n_min` (default 20) are merged into `"<parent>::othe
 
 ## Reference
 
-Original paper: *Graph-Based Two-Three Wheeler Classification in Unconstrained Indian Roads* — see [PDF in repo root](Graph-Based_Two-Three_Wheeler_Classification_in_Unconstrained_Indian_Roads.pdf).
+Original paper: *Graph-Based Two-Three Wheeler Classification in Unconstrained Indian Roads* 
