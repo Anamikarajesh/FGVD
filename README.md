@@ -48,7 +48,7 @@ results/                                         # comparison_table.csv + summar
 | L2 classes | ~10 | 39 |
 | L3 classes | ~30 | 200 |
 | SGCN edge weights | Dynamic Gaussian per crop | Same (skeleton + computed weights) |
-| Long-tail handling | None reported | **Tail-merge + masked-softmax hierarchy + class-balanced loss** for L2/L3 |
+| Long-tail handling | None reported | **Tail-merge + class-balanced loss** for L2/L3 |
 | Reported metrics | Top-1 acc | Top-1 + top-3 + top-5 + macro/weighted F1 + coverage |
 
 L2 has 13 classes with <20 train samples; L3 has 112. Those are merged into `<parent>::other` buckets at threshold `n_min=20` (configurable) and **coverage** is reported alongside accuracy so the comparison stays honest.
@@ -93,8 +93,8 @@ out = run_experiment(cfg)
 
 `run_experiment` will:
 1. Load metadata, build the level's label space, filter rows whose feature files exist.
-2. Auto-enable hierarchy + tail-merge for L2/L3 (defaults: `tail_merge_min=20`).
-3. Train with class-balanced loss (or logit-adjusted CE for flat L1) and resume-capable checkpointing.
+2. Auto-enable tail-merge for L2/L3 (defaults: `tail_merge_min=20`).
+3. Train with class-balanced loss and resume-capable checkpointing.
 4. Save `best.pt` / `last.pt` / `metrics.json` under `checkpoints/{method}/{features}/{level}_all/`.
 5. Save the loss/accuracy plot under `plots/{method}/{features}/{level}_all_curves.png`.
 6. Return a dict with metrics, history, predictions.
@@ -121,7 +121,7 @@ All four training notebooks support resume — re-running a level's cell continu
 - **Graphs:** `load_skeleton_edge_index`, `compute_gaussian_edge_weights`
 - **Datasets:** `FGVDGraphDataset` (PyG), `FGVDPooledDataset` (CNN/MLP)
 - **Models:** `SGCNModel`, `GATModel`, `DeepMLP`
-- **Hierarchy:** `MaskedHierarchicalCE`, `build_parent_index`
+- **Hierarchy helpers:** `MaskedHierarchicalCE`, `build_parent_index` (opt-in only)
 - **Long-tail losses:** `LogitAdjustedCE`, `FocalLoss`, `compute_class_balanced_weights`
 - **Training:** `fit_with_resume`, `run_epoch`, `evaluate` (with top-k)
 - **Metrics:** `stratified_accuracy_by_support`, `per_parent_macro_f1`
@@ -134,15 +134,15 @@ All four training notebooks support resume — re-running a level's cell continu
 ### Adjacency / edge weights
 The paper computes per-crop Gaussian edge weights `exp(-||RGB_u - RGB_v||² / 2σ²)` over the 8-neighbour grid. This repo computes those weights **dynamically on the GPU per batch** (`compute_gaussian_edge_weights`) for both SGCN variants and GAT. The pre-baked `master_grid_adj.npz` and `per_sample_adj/` files are therefore not consumed at training time. This fixes a bug in the original `sgcn.ipynb` which was reusing one shared edge-weight matrix across all 24,450 vehicles.
 
-### Hierarchy via masked softmax
-For L2/L3, training uses `MaskedHierarchicalCE`: for each sample, logits whose L1 (or L2) parent doesn't match the true parent are set to `-∞` before the cross-entropy. This forces the model to compete only inside the correct parent group during training — equivalent to a cascaded prediction head, but trained end-to-end.
+### Hierarchy
+L2/L3 train flat by default. `MaskedHierarchicalCE` is still available by setting `hierarchical=True`, but it assumes the true parent is known during training; for global top-k evaluation, the flat objective is the safer default.
 
 ### Tail merging
 Classes with `train_count < n_min` (default 20) are merged into `"<parent>::other"`. Coverage (% of test samples whose true class survived merging) is reported in `metrics.json` and the comparison table.
 
 ### Class imbalance
 - All training uses `compute_class_balanced_weights` (Cui et al., CVPR'19): `weight_c = (1-β)/(1-β^n_c)` with `β=0.999`.
-- L1 can additionally use `LogitAdjustedCE` (Menon et al., ICLR'21).
+- `LogitAdjustedCE` (Menon et al., ICLR'21) is available by setting `use_logit_adjustment=True`.
 
 ---
 
@@ -157,4 +157,4 @@ Classes with `train_count < n_min` (default 20) are merged into `"<parent>::othe
 
 ## Reference
 
-Original paper: *Graph-Based Two-Three Wheeler Classification in Unconstrained Indian Roads* 
+Original paper: *Graph-Based Two-Three Wheeler Classification in Unconstrained Indian Roads* — see [PDF in repo root](Graph-Based_Two-Three_Wheeler_Classification_in_Unconstrained_Indian_Roads.pdf).

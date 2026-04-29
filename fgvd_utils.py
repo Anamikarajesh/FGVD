@@ -48,6 +48,7 @@ High-level entry point:
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
@@ -442,7 +443,12 @@ class SGCNModel(nn.Module):
 
 
 class GATModel(nn.Module):
-    """GAT with dynamic edge weights as edge_attr (1-d)."""
+    """GAT with dynamic edge weights as edge_attr (1-d).
+
+    ``hidden_dim`` is treated as the total hidden width. PyG's GATConv
+    interprets ``out_channels`` as the per-head width when ``concat=True``, so
+    using hidden_dim directly there multiplies activation memory by ``heads``.
+    """
 
     def __init__(
         self,
@@ -456,9 +462,11 @@ class GATModel(nn.Module):
         super().__init__()
         self.edge_sigma = edge_sigma
         self.dropout = dropout
-        self.conv1 = GATConv(in_channels, hidden_dim, heads=heads, dropout=dropout, edge_dim=1, concat=True)
-        self.bn1 = nn.BatchNorm1d(hidden_dim * heads)
-        self.conv2 = GATConv(hidden_dim * heads, hidden_dim, heads=1, dropout=dropout, edge_dim=1, concat=True)
+        self.head_dim = max(1, (hidden_dim + heads - 1) // heads)
+        self.gat_hidden_dim = self.head_dim * heads
+        self.conv1 = GATConv(in_channels, self.head_dim, heads=heads, dropout=dropout, edge_dim=1, concat=True)
+        self.bn1 = nn.BatchNorm1d(self.gat_hidden_dim)
+        self.conv2 = GATConv(self.gat_hidden_dim, hidden_dim, heads=1, dropout=dropout, edge_dim=1, concat=True)
         self.bn2 = nn.BatchNorm1d(hidden_dim)
         self.classifier = nn.Linear(hidden_dim, num_classes)
 
@@ -499,7 +507,7 @@ class DeepMLP(nn.Module):
 
 
 # ============================================================
-# Hierarchy: single multi-head model with masked-softmax loss
+# Hierarchy helpers: opt-in masked-softmax loss
 # ============================================================
 
 def build_parent_index(class_names: Sequence[str], level: str) -> np.ndarray:
@@ -618,15 +626,50 @@ def compute_class_balanced_weights(class_freq: np.ndarray, beta: float = 0.999) 
 # Training loop (PyG models + plain torch)
 # ============================================================
 
+def _autocast_context(device: torch.device, enabled: bool):
+    if not enabled:
+        return nullcontext()
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        return torch.amp.autocast(device_type=device.type, enabled=True)
+    return torch.cuda.amp.autocast(enabled=True)
+
+
+def _make_grad_scaler(device: torch.device, enabled: bool):
+    enabled = bool(enabled and device.type == "cuda")
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        try:
+            return torch.amp.GradScaler(device.type, enabled=enabled)
+        except TypeError:
+            return torch.amp.GradScaler(enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
 def _is_pyg_batch(batch) -> bool:
     return isinstance(batch, Data)
 
 
-def run_epoch(model, loader, criterion, optimizer=None, device=DEVICE) -> tuple[float, float, float, np.ndarray, np.ndarray]:
+def run_epoch(
+    model,
+    loader,
+    criterion,
+    optimizer=None,
+    device=DEVICE,
+    *,
+    scaler=None,
+    use_amp: bool = False,
+    grad_accum_steps: int = 1,
+) -> tuple[float, float, float, np.ndarray, np.ndarray]:
+    device = torch.device(device)
     training = optimizer is not None
     model.train() if training else model.eval()
     total_loss, n = 0.0, 0
     preds_all, targets_all = [], []
+    amp_enabled = bool(use_amp and device.type == "cuda")
+    grad_accum_steps = max(1, int(grad_accum_steps))
+    pending_backward_steps = 0
+
+    if training:
+        optimizer.zero_grad(set_to_none=True)
 
     for batch in loader:
         if _is_pyg_batch(batch):
@@ -640,21 +683,40 @@ def run_epoch(model, loader, criterion, optimizer=None, device=DEVICE) -> tuple[
             targets = y
             inputs = x
 
-        if training:
-            optimizer.zero_grad(set_to_none=True)
-
         with torch.set_grad_enabled(training):
-            logits = model(inputs)
-            loss = criterion(logits, targets)
+            with _autocast_context(device, amp_enabled):
+                logits = model(inputs)
+                loss = criterion(logits, targets)
             if training:
-                loss.backward()
-                optimizer.step()
+                loss_for_backward = loss / grad_accum_steps
+                if scaler is not None and amp_enabled:
+                    scaler.scale(loss_for_backward).backward()
+                else:
+                    loss_for_backward.backward()
+                pending_backward_steps += 1
+
+                if pending_backward_steps >= grad_accum_steps:
+                    if scaler is not None and amp_enabled:
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                    pending_backward_steps = 0
 
         bs = targets.size(0)
         total_loss += loss.item() * bs
         n += bs
         preds_all.append(logits.argmax(dim=1).detach().cpu().numpy())
         targets_all.append(targets.detach().cpu().numpy())
+
+    if training and pending_backward_steps > 0:
+        if scaler is not None and amp_enabled:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
 
     avg_loss = total_loss / max(n, 1)
     preds = np.concatenate(preds_all) if preds_all else np.array([], dtype=np.int64)
@@ -674,14 +736,19 @@ def fit_with_resume(
     target_total_epochs: int,
     ckpt_dir: Path,
     label_classes: Sequence[str],
+    run_signature: dict | None = None,
     resume: bool = True,
     print_every: int = 5,
     device=DEVICE,
+    use_amp: bool = False,
+    grad_accum_steps: int = 1,
 ) -> tuple[nn.Module, dict]:
+    device = torch.device(device)
     ckpt_dir = Path(ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     last_ckpt = ckpt_dir / "last.pt"
     best_ckpt = ckpt_dir / "best.pt"
+    scaler = _make_grad_scaler(device, use_amp)
 
     history = {k: [] for k in ["epoch", "train_loss", "val_loss", "train_acc", "val_acc", "train_f1", "val_f1"]}
     start_epoch = 1
@@ -690,20 +757,60 @@ def fit_with_resume(
 
     if resume and last_ckpt.exists():
         ckpt = torch.load(last_ckpt, map_location="cpu")
-        if ckpt.get("label_classes") == list(label_classes):
-            model.load_state_dict(ckpt["model_state"])
-            optimizer.load_state_dict(ckpt["optim_state"])
-            history = ckpt.get("history", history)
-            start_epoch = int(ckpt.get("epoch", 0)) + 1
-            best_val_acc = float(ckpt.get("best_val_acc", -1.0))
-            best_state = ckpt.get("best_state", None)
-            print(f"Resumed from {last_ckpt} (epoch {start_epoch - 1}).")
+        label_match = ckpt.get("label_classes") == list(label_classes)
+        if label_match:
+            if run_signature is not None and ckpt.get("run_signature") != run_signature:
+                print("Checkpoint training config differs — starting fresh.")
+                ckpt_sig = ckpt.get("run_signature")
+                if ckpt_sig is not None:
+                    changed = [
+                        k for k, v in run_signature.items()
+                        if ckpt_sig.get(k) != v
+                    ]
+                    if changed:
+                        print(f"  Changed keys: {', '.join(changed[:6])}")
+                else:
+                    print("  Existing checkpoint has no run signature.")
+                ckpt = None
         else:
             print("Checkpoint label space differs — starting fresh.")
 
+        if ckpt is not None and label_match:
+            model_state = ckpt.get("model_state", {})
+            current_state = model.state_dict()
+            mismatched = [
+                (k, tuple(v.shape), tuple(current_state[k].shape))
+                for k, v in model_state.items()
+                if k in current_state and tuple(v.shape) != tuple(current_state[k].shape)
+            ]
+            missing = [k for k in current_state if k not in model_state]
+            unexpected = [k for k in model_state if k not in current_state]
+
+            if mismatched or missing or unexpected:
+                print("Checkpoint model architecture differs — starting fresh.")
+                if mismatched:
+                    k, old_shape, new_shape = mismatched[0]
+                    print(f"  First mismatch: {k} checkpoint={old_shape} current={new_shape}")
+            else:
+                model.load_state_dict(model_state)
+                optimizer.load_state_dict(ckpt["optim_state"])
+                scaler_state = ckpt.get("scaler_state")
+                if scaler_state is not None and scaler.is_enabled():
+                    scaler.load_state_dict(scaler_state)
+                history = ckpt.get("history", history)
+                start_epoch = int(ckpt.get("epoch", 0)) + 1
+                best_val_acc = float(ckpt.get("best_val_acc", -1.0))
+                best_state = ckpt.get("best_state", None)
+                print(f"Resumed from {last_ckpt} (epoch {start_epoch - 1}).")
+
     for epoch in range(start_epoch, target_total_epochs + 1):
-        tr_loss, tr_acc, tr_f1, _, _ = run_epoch(model, train_loader, criterion, optimizer, device)
-        va_loss, va_acc, va_f1, _, _ = run_epoch(model, val_loader, criterion, None, device)
+        tr_loss, tr_acc, tr_f1, _, _ = run_epoch(
+            model, train_loader, criterion, optimizer, device,
+            scaler=scaler, use_amp=use_amp, grad_accum_steps=grad_accum_steps,
+        )
+        va_loss, va_acc, va_f1, _, _ = run_epoch(
+            model, val_loader, criterion, None, device, use_amp=use_amp,
+        )
 
         for k, v in zip(
             ["epoch", "train_loss", "val_loss", "train_acc", "val_acc", "train_f1", "val_f1"],
@@ -717,14 +824,17 @@ def fit_with_resume(
             best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
             torch.save(
                 {"epoch": epoch, "best_val_acc": best_val_acc, "best_state": best_state,
-                 "history": history, "label_classes": list(label_classes)},
+                 "history": history, "label_classes": list(label_classes),
+                 "run_signature": run_signature},
                 best_ckpt,
             )
 
         torch.save(
             {"epoch": epoch, "model_state": model.state_dict(), "optim_state": optimizer.state_dict(),
              "best_val_acc": best_val_acc, "best_state": best_state, "history": history,
-             "label_classes": list(label_classes)},
+             "label_classes": list(label_classes),
+             "run_signature": run_signature,
+             "scaler_state": scaler.state_dict() if scaler.is_enabled() else None},
             last_ckpt,
         )
 
@@ -737,27 +847,33 @@ def fit_with_resume(
     return model, history
 
 
-def evaluate(model, loader, criterion=None, k_list=(1, 3, 5), device=DEVICE) -> dict:
+def evaluate(model, loader, criterion=None, k_list=(1, 3, 5), device=DEVICE,
+             use_amp: bool = False) -> dict:
     """Top-k accuracy + macro/weighted F1 + raw predictions."""
+    device = torch.device(device)
     model.eval()
     all_logits, all_targets = [], []
     total_loss, n = 0.0, 0
+    amp_enabled = bool(use_amp and device.type == "cuda")
 
     with torch.no_grad():
         for batch in loader:
             if _is_pyg_batch(batch):
                 batch = batch.to(device, non_blocking=(device.type == "cuda"))
                 targets = batch.y.view(-1)
-                logits = model(batch)
+                with _autocast_context(device, amp_enabled):
+                    logits = model(batch)
             else:
                 x, y = batch
                 x = x.to(device, non_blocking=(device.type == "cuda"))
                 y = y.to(device, non_blocking=(device.type == "cuda"))
                 targets = y
-                logits = model(x)
+                with _autocast_context(device, amp_enabled):
+                    logits = model(x)
 
             if criterion is not None:
-                loss = criterion(logits, targets)
+                with _autocast_context(device, amp_enabled):
+                    loss = criterion(logits, targets)
                 bs = targets.size(0)
                 total_loss += loss.item() * bs
                 n += bs
@@ -882,7 +998,7 @@ class ExperimentConfig:
     case: str = "all"
     deep_subdir: str = DEFAULT_DEEP_SUBDIR
     edge_sigma: float = DEFAULT_EDGE_SIGMA
-    hierarchical: bool | None = None
+    hierarchical: bool | None = None  # None defaults to flat CE; set True to opt into MaskedHierarchicalCE
     tail_merge_min: int | None = None
     epochs: int = 100
     batch_size: int = 32
@@ -895,17 +1011,19 @@ class ExperimentConfig:
     rf_n_estimators: int = 200
     rf_max_depth: int = 20
     rf_pca_dim: int = 256           # used for raw RF
-    use_logit_adjustment: bool = True
+    use_logit_adjustment: bool = False
     label_smoothing: float = 0.05
     num_workers: int = 0
     resume: bool = True
     print_every: int = 5
+    grad_accum_steps: int = 1
+    use_amp: bool = True
     seed: int = SEED
 
 
 def _autoset_hierarchy(cfg: ExperimentConfig) -> ExperimentConfig:
     if cfg.hierarchical is None:
-        cfg.hierarchical = cfg.level in ("L2", "L3")
+        cfg.hierarchical = False
     if cfg.tail_merge_min is None and cfg.level in ("L2", "L3"):
         cfg.tail_merge_min = 20
     return cfg
@@ -966,6 +1084,8 @@ def _build_criterion(cfg, y_train: np.ndarray, num_classes: int, le: LabelEncode
     counts = np.maximum(counts, 1.0)
     cb_weights = torch.tensor(compute_class_balanced_weights(counts), device=DEVICE)
 
+    # Opt-in only. MaskedHierarchicalCE assumes the true parent is known while
+    # training, so plain global top-k accuracy can look artificially poor.
     if cfg.hierarchical and cfg.level in ("L2", "L3"):
         parent_idx, _ = build_parent_index(le.classes_.tolist(), cfg.level)
         parent_t = torch.tensor(parent_idx, device=DEVICE)
@@ -976,6 +1096,27 @@ def _build_criterion(cfg, y_train: np.ndarray, num_classes: int, le: LabelEncode
         return LogitAdjustedCE(freq, tau=1.0, weight=cb_weights)
 
     return nn.CrossEntropyLoss(weight=cb_weights, label_smoothing=cfg.label_smoothing)
+
+
+def _run_signature(cfg: ExperimentConfig, n_classes: int) -> dict:
+    """Fields that must match to safely resume a torch checkpoint."""
+    return {
+        "method": cfg.method,
+        "level": cfg.level,
+        "feature_source": cfg.feature_source,
+        "case": cfg.case,
+        "deep_subdir": cfg.deep_subdir,
+        "n_classes": int(n_classes),
+        "tail_merge_min": cfg.tail_merge_min,
+        "hierarchical": bool(cfg.hierarchical),
+        "use_logit_adjustment": bool(cfg.use_logit_adjustment),
+        "label_smoothing": float(cfg.label_smoothing),
+        "hidden_dim": int(cfg.hidden_dim),
+        "num_layers": int(cfg.num_layers),
+        "heads": int(cfg.heads),
+        "dropout": float(cfg.dropout),
+        "edge_sigma": float(cfg.edge_sigma),
+    }
 
 
 # ----- RF path (sklearn) -----
@@ -1123,17 +1264,28 @@ def run_experiment(cfg: ExperimentConfig, *, ckpt_root: Path = Path("checkpoints
 
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     criterion = _build_criterion(cfg, y_tr, n_classes, le)
+    if cfg.grad_accum_steps > 1:
+        print(f"Gradient accumulation: micro_batch={cfg.batch_size} "
+              f"effective_batch={cfg.batch_size * cfg.grad_accum_steps}")
+    if cfg.use_amp and DEVICE.type == "cuda":
+        print("AMP mixed precision: enabled")
 
     model, history = fit_with_resume(
         model, train_loader, val_loader,
         optimizer=optimizer, criterion=criterion,
         target_total_epochs=cfg.epochs, ckpt_dir=ckpt_dir,
-        label_classes=le.classes_.tolist(), resume=cfg.resume,
+        label_classes=le.classes_.tolist(), run_signature=_run_signature(cfg, n_classes),
+        resume=cfg.resume,
         print_every=cfg.print_every,
+        use_amp=cfg.use_amp,
+        grad_accum_steps=cfg.grad_accum_steps,
     )
 
     # final test eval (un-masked CE for fair top-k)
-    test_metrics = evaluate(model, test_loader, criterion=nn.CrossEntropyLoss(), k_list=(1, 3, 5))
+    test_metrics = evaluate(
+        model, test_loader, criterion=nn.CrossEntropyLoss(), k_list=(1, 3, 5),
+        use_amp=cfg.use_amp,
+    )
     test_metrics["val_acc_best"] = float(max(history["val_acc"])) if history["val_acc"] else None
 
     print(f"\nTest acc={test_metrics['acc']:.4f} | top3={test_metrics['top3_acc']:.4f} "
