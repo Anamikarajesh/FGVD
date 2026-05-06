@@ -11,6 +11,7 @@ import cv2
 import joblib
 import numpy as np
 import torch
+from huggingface_hub import hf_hub_download
 from PIL import Image, ImageDraw, ImageFont
 from torch_geometric.data import Data
 
@@ -59,6 +60,18 @@ def _require_file(path: Path) -> Path:
     if not path.exists():
         raise FileNotFoundError(f"Required file not found: {path}")
     return path
+
+
+def _download_from_huggingface(repo_id: str, filename: str, cache_dir: Path | None = None) -> Path:
+    """Download a file from Hugging Face Hub and cache it locally."""
+    try:
+        path = hf_hub_download(repo_id=repo_id, filename=filename, cache_dir=str(cache_dir) if cache_dir else None)
+        return Path(path)
+    except Exception as e:
+        raise DashboardDependencyError(
+            f"Failed to download {filename} from Hugging Face Hub ({repo_id}). "
+            f"Please ensure the model repository is public and accessible. Error: {str(e)}"
+        )
 
 
 @lru_cache(maxsize=1)
@@ -325,11 +338,17 @@ class DashboardPipeline:
             l2_file = class_root / "L2.joblib"
             l3_file = class_root / "L3.joblib"
             if not l2_file.exists() or not l3_file.exists():
-                raise DashboardDependencyError(
-                    "The 'improved' model variant requires L2.joblib and L3.joblib files which are not available in this environment. "
-                    "This is expected on Streamlit Cloud (files are too large for git). "
-                    "Please use the 'Paper model' variant instead."
-                )
+                try:
+                    hf_repo_id = "Anamikarajesh/FGVD-improved-models"
+                    l2_file = _download_from_huggingface(hf_repo_id, "L2.joblib", cache_dir=class_root)
+                    l3_file = _download_from_huggingface(hf_repo_id, "L3.joblib", cache_dir=class_root)
+                except DashboardDependencyError:
+                    raise DashboardDependencyError(
+                        "The 'improved' model variant requires L2.joblib and L3.joblib files. "
+                        "These are hosted on Hugging Face Hub but are not yet available. "
+                        "Please use the 'Paper model' variant or set up your own Hugging Face repository. "
+                        "See: https://huggingface.co for details."
+                    )
             self.l1 = SGCNPredictor(class_root / "L1.pt", self.device)
             self.l2 = None
             self.l3 = None

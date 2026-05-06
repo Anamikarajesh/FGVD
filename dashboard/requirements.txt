@@ -11,3 +11,4 @@ torch>=2.5,<3.0
 torchvision
 torch-geometric>=2.6
 tqdm>=4.66
+huggingface_hub>=0.20.0
