@@ -27,11 +27,11 @@ import numpy as np
 TARGET_H, TARGET_W = 64, 64
 N_NODES = TARGET_H * TARGET_W
 
-# Gabor — matches FGVD_Graph_Handover/README.md: σ = λ / π
+# Gabor — matching baseline_handover.py (sigma=lambda/pi)
 GABOR_LAMBDA = 6.0
 GABOR_FREQ = 1.0 / GABOR_LAMBDA
 GABOR_GAMMA = 1.0
-GABOR_SIGMA = GABOR_LAMBDA / np.pi
+GABOR_SIGMA = GABOR_LAMBDA / np.pi  # ≈ 1.91
 GABOR_THETAS = [0, np.pi/4, np.pi/2, 3*np.pi/4]
 GABOR_PSI = 0
 
@@ -92,9 +92,7 @@ GABOR_KERNELS = _build_gabor_kernels()
 
 def extract_gabor(img_bgr: np.ndarray) -> np.ndarray:
     """
-    Gabor extraction:
-    - Uses σ = λ / π, matching the saved training raw features
-    - Returns RAW responses (no normalization for single image)
+    Gabor extraction with per-channel min-max normalization (matching training data).
     """
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
     channels = []
@@ -102,13 +100,18 @@ def extract_gabor(img_bgr: np.ndarray) -> np.ndarray:
         resp = cv2.filter2D(gray, cv2.CV_32F, k)
         channels.append(resp.ravel())
 
-    return np.stack(channels, axis=1).astype(np.float32)
+    raw = np.stack(channels, axis=1).astype(np.float32)
+
+    gmin = raw.min(axis=0, keepdims=True)
+    gmax = raw.max(axis=0, keepdims=True)
+    denom = gmax - gmin
+    denom[denom == 0] = 1.0
+    return (raw - gmin) / denom
 
 
 def extract_sobel(img_bgr: np.ndarray) -> np.ndarray:
     """
-    FIXED Sobel extraction:
-    - Returns RAW magnitude values (no normalization for single image)
+    Sobel extraction with per-sample min-max normalization (matching training data).
     """
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
 
@@ -116,7 +119,14 @@ def extract_sobel(img_bgr: np.ndarray) -> np.ndarray:
     Gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
 
     magnitude = np.sqrt(Gx**2 + Gy**2)
-    return magnitude.ravel().reshape(N_NODES, 1).astype(np.float32)
+    raw = magnitude.ravel().reshape(N_NODES, 1).astype(np.float32)
+
+    smin = raw.min()
+    smax = raw.max()
+    denom = smax - smin
+    if denom == 0:
+        denom = 1.0
+    return (raw - smin) / denom
 
 
 # ===========================================================================

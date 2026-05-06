@@ -11,8 +11,6 @@ import cv2
 import joblib
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from PIL import Image, ImageDraw, ImageFont
 from torch_geometric.data import Data
 
@@ -21,6 +19,7 @@ DASHBOARD_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = DASHBOARD_DIR.parent
 FEATURE_DIR = DASHBOARD_DIR / "feature_extraction "
 FEATURE_SCRIPT = FEATURE_DIR / "single_image_feature_extractor.py"
+FEATURE_REFINER_SCRIPT = FEATURE_DIR / "feature_refiner.py"
 DEEP_FEATURE_CKPT = FEATURE_DIR / "best_multilevel.pt"
 
 if str(PROJECT_ROOT) not in sys.path:
@@ -56,84 +55,6 @@ class VehiclePrediction:
     l3: LevelPrediction
 
 
-class ConvBNReLU(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, kernel_size: int, padding: int = 0):
-        super().__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, kernel_size=kernel_size, padding=padding, bias=False),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.block(x)
-
-
-class InceptionBlock(nn.Module):
-    def __init__(
-        self,
-        in_ch: int,
-        b1: int,
-        b2_reduce: int,
-        b2: int,
-        b3_reduce: int,
-        b3: int,
-        b4: int,
-    ):
-        super().__init__()
-        self.branch1 = ConvBNReLU(in_ch, b1, kernel_size=1)
-        self.branch2 = nn.Sequential(
-            ConvBNReLU(in_ch, b2_reduce, kernel_size=1),
-            ConvBNReLU(b2_reduce, b2, kernel_size=3, padding=1),
-        )
-        self.branch3 = nn.Sequential(
-            ConvBNReLU(in_ch, b3_reduce, kernel_size=1),
-            ConvBNReLU(b3_reduce, b3, kernel_size=5, padding=2),
-        )
-        self.branch4 = ConvBNReLU(in_ch, b4, kernel_size=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        pooled = F.max_pool2d(x, kernel_size=3, stride=1, padding=1)
-        return torch.cat(
-            [self.branch1(x), self.branch2(x), self.branch3(x), self.branch4(pooled)],
-            dim=1,
-        )
-
-
-class MultilevelFeatureBackbone(nn.Module):
-    def __init__(self, in_channels: int = 8, out_dim: int = 64, num_classes: dict | None = None):
-        super().__init__()
-        num_classes = num_classes or {"L1": 7, "L2": 39, "L3": 200}
-        self.inception1 = InceptionBlock(in_channels, 16, 8, 24, 4, 16, 8)
-        self.inception2 = InceptionBlock(64, 32, 16, 48, 8, 32, 16)
-        self.proj = nn.Sequential(
-            nn.Conv2d(128, out_dim, kernel_size=1, bias=False),
-            nn.BatchNorm2d(out_dim),
-            nn.ReLU(inplace=True),
-        )
-        self.head_L1 = self._make_head(128, int(num_classes.get("L1", 7)))
-        self.head_L2 = self._make_head(128, int(num_classes.get("L2", 39)))
-        self.head_L3 = self._make_head(128, int(num_classes.get("L3", 200)))
-
-    @staticmethod
-    def _make_head(in_ch: int, n_classes: int) -> nn.Sequential:
-        return nn.Sequential(
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
-            nn.Dropout(0.3),
-            nn.Linear(in_ch, n_classes),
-        )
-
-    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.inception1(x)
-        x = self.inception2(x)
-        x = self.proj(x)
-        return x
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_features(x)
-
-
 def _require_file(path: Path) -> Path:
     if not path.exists():
         raise FileNotFoundError(f"Required file not found: {path}")
@@ -146,6 +67,17 @@ def _feature_module():
     spec = importlib.util.spec_from_file_location("single_image_feature_extractor", FEATURE_SCRIPT)
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not import feature extractor from {FEATURE_SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@lru_cache(maxsize=1)
+def _feature_refiner_module():
+    _require_file(FEATURE_REFINER_SCRIPT)
+    spec = importlib.util.spec_from_file_location("feature_refiner", FEATURE_REFINER_SCRIPT)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not import feature refiner from {FEATURE_REFINER_SCRIPT}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -351,10 +283,12 @@ class DeepFeatureExtractor:
     def __init__(self, device: torch.device):
         ckpt = torch.load(_require_file(DEEP_FEATURE_CKPT), map_location="cpu")
         self.device = device
-        self.model = MultilevelFeatureBackbone(
-            in_channels=int(ckpt.get("in_channels", 8)),
-            out_dim=int(ckpt.get("D", 64)),
-            num_classes=ckpt.get("num_classes", None),
+        if int(ckpt.get("in_channels", 8)) != 8:
+            raise ValueError(f"Expected 8-channel deep refiner checkpoint, got {ckpt.get('in_channels')}")
+        refiner = _feature_refiner_module()
+        self.model = refiner.MultiLevelDeepFeatureRefiner(
+            num_classes=ckpt["num_classes"],
+            D=int(ckpt.get("D", 64)),
         )
         self.model.load_state_dict(ckpt["model_state"], strict=True)
         self.model.to(device).eval()
@@ -363,7 +297,7 @@ class DeepFeatureExtractor:
         grid = raw8.reshape(64, 64, raw8.shape[1]).transpose(2, 0, 1)
         x = torch.from_numpy(np.ascontiguousarray(grid)).unsqueeze(0).float().to(self.device)
         with torch.no_grad():
-            feat = self.model.forward_features(x)
+            feat = self.model(x, return_spatial=True)
         arr = feat.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
         return arr.reshape(64 * 64, -1).astype(np.float32)
 
