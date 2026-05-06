@@ -7,6 +7,26 @@ pip install -r dashboard/requirements.txt
 python -m streamlit run dashboard/app.py
 ```
 
+## Screenshots
+
+### Real-time dashboard
+
+![Real-time dashboard](images/Real_time_dashboard.png)
+
+### Paper model
+
+![Paper model output](images/Paper_model.png)
+
+### Our best model
+
+![Our best model output](images/Best_model.png)
+
+### Trial run
+
+![Trial run](images/Real_try.png)
+
+## Model Options
+
 The app has two model options:
 
 - `Our best model`: `dashboard/detection/best(m).pt` + improved classification checkpoints.
