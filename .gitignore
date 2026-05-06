@@ -42,11 +42,15 @@ FGVD_Graph_Handover/per_sample_adj/
 
 # Model & feature blobs anywhere in the tree, but keep the tracked
 # adjacency .npz files inside FGVD_Graph_Handover/.
-*.pt
+# Note: Paper variant (.pt files) are tracked for Streamlit Cloud deployment
+# Improved variant (large .joblib files) are excluded due to size
 *.pth
 *.ckpt
 *.joblib
 *.npy
 *.npz
+!dashboard/feature_extraction/best_multilevel.pt
+!dashboard/detection/*.pt
+!dashboard/classification/paperbased/*.pt
 !FGVD_Graph_Handover/master_grid_skeleton.npz
 !FGVD_Graph_Handover/master_grid_adj.npz
