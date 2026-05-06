@@ -1,0 +1,1 @@
+"""FGVD Streamlit dashboard package."""
