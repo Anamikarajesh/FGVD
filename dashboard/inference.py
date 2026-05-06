@@ -340,8 +340,8 @@ class DashboardPipeline:
             if not l2_file.exists() or not l3_file.exists():
                 try:
                     hf_repo_id = "anamikarajesh/FGVD-improved-models"
-                    l2_file = _download_from_huggingface(hf_repo_id, "L2.joblib", cache_dir=class_root)
-                    l3_file = _download_from_huggingface(hf_repo_id, "L3.joblib", cache_dir=class_root)
+                    l2_file = _download_from_huggingface(hf_repo_id, "L2.joblib")
+                    l3_file = _download_from_huggingface(hf_repo_id, "L3.joblib")
                 except DashboardDependencyError:
                     raise DashboardDependencyError(
                         "The 'improved' model variant requires L2.joblib and L3.joblib files. "
