@@ -44,7 +44,7 @@ with st.sidebar:
     model_choice = st.radio(
         "Model option",
         ["Our best model", "Paper model"],
-        index=0,
+        index=1,
         help="Our best: YOLO best(m) + deep SGCN/RF. Paper: YOLOv8n + raw SGCN.",
     )
     variant = "improved" if model_choice == "Our best model" else "paper"
