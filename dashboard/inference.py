@@ -11,7 +11,6 @@ import cv2
 import joblib
 import numpy as np
 import torch
-from huggingface_hub import hf_hub_download
 from PIL import Image, ImageDraw, ImageFont
 from torch_geometric.data import Data
 
@@ -65,6 +64,7 @@ def _require_file(path: Path) -> Path:
 def _download_from_huggingface(repo_id: str, filename: str, cache_dir: Path | None = None) -> Path:
     """Download a file from Hugging Face Hub and cache it locally."""
     try:
+        from huggingface_hub import hf_hub_download
         path = hf_hub_download(repo_id=repo_id, filename=filename, cache_dir=str(cache_dir) if cache_dir else None)
         return Path(path)
     except Exception as e:

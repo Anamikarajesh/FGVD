@@ -1,25 +1,19 @@
 from __future__ import annotations
 
 import importlib.util
-import traceback
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 from PIL import Image
 
-try:
-    from inference import (
-        DashboardDependencyError,
-        DashboardPipeline,
-        draw_annotations,
-        predictions_to_rows,
-        topk_text,
-    )
-except Exception as e:
-    st.error(f"Failed to import inference module: {str(e)}")
-    st.error(traceback.format_exc())
-    st.stop()
+from inference import (
+    DashboardDependencyError,
+    DashboardPipeline,
+    draw_annotations,
+    predictions_to_rows,
+    topk_text,
+)
 
 
 st.set_page_config(page_title="FGVD Vehicle Dashboard", layout="wide")
