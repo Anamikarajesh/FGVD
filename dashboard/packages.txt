@@ -1,4 +1,6 @@
 libgl1
+libffi7
+libpcre3
 libglib2.0-0
 libxext6
 libx11-6
