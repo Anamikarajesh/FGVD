@@ -339,7 +339,7 @@ class DashboardPipeline:
             l3_file = class_root / "L3.joblib"
             if not l2_file.exists() or not l3_file.exists():
                 try:
-                    hf_repo_id = "Anamikarajesh/FGVD-improved-models"
+                    hf_repo_id = "anamikarajesh/FGVD-improved-models"
                     l2_file = _download_from_huggingface(hf_repo_id, "L2.joblib", cache_dir=class_root)
                     l3_file = _download_from_huggingface(hf_repo_id, "L3.joblib", cache_dir=class_root)
                 except DashboardDependencyError:
