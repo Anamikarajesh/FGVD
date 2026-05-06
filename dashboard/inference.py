@@ -322,12 +322,20 @@ class DashboardPipeline:
             self.rf_l2 = None
             self.rf_l3 = None
         else:
+            l2_file = class_root / "L2.joblib"
+            l3_file = class_root / "L3.joblib"
+            if not l2_file.exists() or not l3_file.exists():
+                raise DashboardDependencyError(
+                    "The 'improved' model variant requires L2.joblib and L3.joblib files which are not available in this environment. "
+                    "This is expected on Streamlit Cloud (files are too large for git). "
+                    "Please use the 'Paper model' variant instead."
+                )
             self.l1 = SGCNPredictor(class_root / "L1.pt", self.device)
             self.l2 = None
             self.l3 = None
             self.deep_extractor = DeepFeatureExtractor(self.device)
-            self.rf_l2 = joblib.load(_require_file(class_root / "L2.joblib"))
-            self.rf_l3 = joblib.load(_require_file(class_root / "L3.joblib"))
+            self.rf_l2 = joblib.load(l2_file)
+            self.rf_l3 = joblib.load(l3_file)
 
     def detect(self, image_rgb: np.ndarray, conf: float = 0.25, max_det: int = 10) -> list[Detection]:
         if self.detector is None:
