@@ -65,7 +65,38 @@ def _download_from_huggingface(repo_id: str, filename: str, cache_dir: Path | No
     """Download a file from Hugging Face Hub and cache it locally."""
     try:
         from huggingface_hub import hf_hub_download
-        path = hf_hub_download(repo_id=repo_id, filename=filename, cache_dir=str(cache_dir) if cache_dir else None)
+        
+        # Try to get token from streamlit secrets or environment
+        import streamlit as st
+        import os
+        
+        # Check for token in multiple places
+        token = None
+        try:
+            # For Streamlit Cloud
+            token = st.secrets.get("HF_TOKEN")
+        except:
+            pass
+        
+        if not token:
+            # For local development with environment variable
+            token = os.environ.get("HF_TOKEN")
+        
+        # Download with token if available
+        if token:
+            path = hf_hub_download(
+                repo_id=repo_id, 
+                filename=filename, 
+                cache_dir=str(cache_dir) if cache_dir else None,
+                token=token  # Add the token here
+            )
+        else:
+            # No token found, download unauthenticated
+            path = hf_hub_download(
+                repo_id=repo_id, 
+                filename=filename, 
+                cache_dir=str(cache_dir) if cache_dir else None
+            )
         return Path(path)
     except Exception as e:
         raise DashboardDependencyError(
