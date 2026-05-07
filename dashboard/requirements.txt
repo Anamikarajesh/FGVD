@@ -10,4 +10,5 @@ matplotlib>=3.7
 torch>=2.5,<3.0
 torchvision
 torch-geometric>=2.6
+ultralytics>=8.2
 tqdm>=4.66

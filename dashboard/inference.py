@@ -152,7 +152,8 @@ def _load_yolo(path: Path):
         from ultralytics import YOLO
     except ImportError as exc:
         raise DashboardDependencyError(
-            "ultralytics is not installed. Install dashboard requirements with "
+            "YOLO detector mode needs the `ultralytics` package. "
+            "Install the dashboard requirements with "
             "`pip install -r dashboard/requirements.txt`."
         ) from exc
     return YOLO(str(_require_file(path)))

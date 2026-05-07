@@ -37,7 +37,7 @@ def show_image(image, **kwargs) -> None:
 
 
 st.title("FGVD Vehicle Classification Dashboard")
-st.caption("Upload a road image, detect vehicle crops, and classify each crop at L1, L2, and L3.")
+st.caption("Upload a vehicle image and classify it at L1, L2, and L3.")
 
 with st.sidebar:
     st.header("Pipeline")
@@ -45,23 +45,28 @@ with st.sidebar:
         "Model option",
         ["Our best model", "Paper model"],
         index=1,
-        help="Our best: YOLO best(m) + deep SGCN/RF. Paper: YOLOv8n + raw SGCN.",
+        help="Our best: deep SGCN. Paper: raw SGCN.",
     )
     variant = "improved" if model_choice == "Our best model" else "paper"
     yolo_available = importlib.util.find_spec("ultralytics") is not None
     st.markdown(
-        "**Our best model** uses `best(m).pt`, deep SGCN for L1, and RF-deep for L2/L3.\n\n"
-        "**Paper model** uses `best_yolov8n.pt` and raw SGCN checkpoints for L1/L2/L3."
+        "**Our best model** uses deep SGCN checkpoints for L1/L2/L3.\n\n"
+        "**Paper model** uses raw SGCN checkpoints for L1/L2/L3."
     )
-    if not yolo_available:
-        st.warning("YOLO detection needs `ultralytics`. Whole-image mode is enabled for this environment.")
-    conf = st.slider("Detection confidence", 0.05, 0.95, 0.25, 0.05)
-    max_det = st.slider("Maximum detections", 1, 30, 10, 1)
-    full_image_mode = st.checkbox(
-        "Classify whole image as one crop",
-        value=not yolo_available,
-        help="Useful for testing cropped vehicle images or when YOLO dependencies are unavailable.",
-    )
+    if yolo_available:
+        st.caption("Optional detector mode is available in this environment.")
+        conf = st.slider("Detection confidence", 0.05, 0.95, 0.25, 0.05)
+        max_det = st.slider("Maximum detections", 1, 30, 10, 1)
+        full_image_mode = st.checkbox(
+            "Classify whole image as one crop",
+            value=False,
+            help="Use this for cropped vehicle images.",
+        )
+    else:
+        st.info("Detector mode is disabled for this deployment. Upload a cropped vehicle image for best results.")
+        conf = 0.25
+        max_det = 1
+        full_image_mode = True
 
 uploaded = st.file_uploader("Upload image", type=["jpg", "jpeg", "png", "bmp", "webp"])
 
@@ -75,7 +80,8 @@ with left:
     st.subheader("Input")
     show_image(image_rgb)
 
-run = st.button("Run detection and classification", type="primary")
+run_label = "Run classification" if full_image_mode else "Run detection and classification"
+run = st.button(run_label, type="primary")
 if not run:
     st.stop()
 
@@ -92,7 +98,7 @@ except Exception as exc:
     st.stop()
 
 if not predictions:
-    st.warning("No vehicle detections found. Lower the confidence threshold or use whole-image mode.")
+    st.warning("No vehicle detections found. Lower the confidence threshold or classify the whole image.")
     st.stop()
 
 annotated = draw_annotations(image_rgb, predictions)
