@@ -369,7 +369,7 @@ class DashboardPipeline:
             self.l1 = SGCNPredictor(class_root / "L1.pt", self.device)
             self.l2 = SGCNPredictor(class_root / "L2.pt", self.device)
             self.l3 = SGCNPredictor(class_root / "L3.pt", self.device)
-            self.deep_extractor = None
+            self.deep_extractor = DeepFeatureExtractor(self.device)
             self.rf_l2 = None
             self.rf_l3 = None
 
@@ -405,9 +405,15 @@ class DashboardPipeline:
 
     def classify_detection(self, image_rgb: np.ndarray, detection: Detection) -> VehiclePrediction:
         raw8, raw7, rgb, _ = self._extract_raw(image_rgb, detection.xyxy)
-        l1 = self.l1.predict(raw8, rgb)
-        l2 = self.l2.predict(raw7, rgb, allowed_prefix=f"{l1.label}::")
-        l3 = self.l3.predict(raw7, rgb, allowed_prefix=f"{l2.label}::")
+        if self.variant == "paper":
+            l1 = self.l1.predict(raw8, rgb)
+            l2 = self.l2.predict(raw7, rgb, allowed_prefix=f"{l1.label}::")
+            l3 = self.l3.predict(raw7, rgb, allowed_prefix=f"{l2.label}::")
+        else:
+            deep = self.deep_extractor.extract(raw8)
+            l1 = self.l1.predict(deep, rgb)
+            l2 = self.l2.predict(deep, rgb, allowed_prefix=f"{l1.label}::")
+            l3 = self.l3.predict(deep, rgb, allowed_prefix=f"{l2.label}::")
         return VehiclePrediction(detection=detection, l1=l1, l2=l2, l3=l3)
 
     def predict_image(self, image_rgb: np.ndarray, conf: float = 0.25, max_det: int = 10) -> list[VehiclePrediction]:
