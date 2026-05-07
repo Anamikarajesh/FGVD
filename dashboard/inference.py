@@ -366,26 +366,12 @@ class DashboardPipeline:
             self.rf_l2 = None
             self.rf_l3 = None
         else:
-            l2_file = class_root / "L2.joblib"
-            l3_file = class_root / "L3.joblib"
-            if not l2_file.exists() or not l3_file.exists():
-                try:
-                    hf_repo_id = "anamikarajesh/FGVD-improved-models"
-                    l2_file = _download_from_huggingface(hf_repo_id, "L2.joblib")
-                    l3_file = _download_from_huggingface(hf_repo_id, "L3.joblib")
-                except DashboardDependencyError:
-                    raise DashboardDependencyError(
-                        "The 'improved' model variant requires L2.joblib and L3.joblib files. "
-                        "These are hosted on Hugging Face Hub but are not yet available. "
-                        "Please use the 'Paper model' variant or set up your own Hugging Face repository. "
-                        "See: https://huggingface.co for details."
-                    )
             self.l1 = SGCNPredictor(class_root / "L1.pt", self.device)
-            self.l2 = None
-            self.l3 = None
-            self.deep_extractor = DeepFeatureExtractor(self.device)
-            self.rf_l2 = joblib.load(l2_file)
-            self.rf_l3 = joblib.load(l3_file)
+            self.l2 = SGCNPredictor(class_root / "L2.pt", self.device)
+            self.l3 = SGCNPredictor(class_root / "L3.pt", self.device)
+            self.deep_extractor = None
+            self.rf_l2 = None
+            self.rf_l3 = None
 
     def detect(self, image_rgb: np.ndarray, conf: float = 0.25, max_det: int = 10) -> list[Detection]:
         if self.detector is None:
