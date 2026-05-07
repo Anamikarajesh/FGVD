@@ -1,14 +1,7 @@
 libgl1
-libffi7
-libpcre3
-libglib2.0-0
+libglib2.0-0t64
 libxext6
 libx11-6
 libxrender1
 libsm6
-libglib2.0-0
-libgl1-mesa-glx
 libgomp1
-libxrender1
-libxext6
-libsm6
