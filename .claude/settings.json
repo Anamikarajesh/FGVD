@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(git commit -m 'Simplify improved variant to use SGCN for all three levels *)"
-    ]
-  }
-}
